@@ -103,7 +103,7 @@ public class MySQLStorageProvider extends ModuleProvider {
 
         mysqlClient = new JDBCHikariCPClient(config.getProperties());
 
-        this.registerServiceImplementation(IBatchDAO.class, new H2BatchDAO(mysqlClient));
+        this.registerServiceImplementation(IBatchDAO.class, new H2BatchDAO(mysqlClient, config.getMaxSizeOfBatchSql(), config.getAsyncBatchPersistentPoolSize()));
         this.registerServiceImplementation(
             StorageDAO.class,
             new H2StorageDAO(
@@ -127,7 +127,11 @@ public class MySQLStorageProvider extends ModuleProvider {
         this.registerServiceImplementation(
             IMetadataQueryDAO.class, new H2MetadataQueryDAO(mysqlClient, config.getMetadataQueryMaxSize()));
         this.registerServiceImplementation(IAggregationQueryDAO.class, new MySQLAggregationQueryDAO(mysqlClient));
-        this.registerServiceImplementation(IAlarmQueryDAO.class, new MySQLAlarmQueryDAO(mysqlClient));
+        this.registerServiceImplementation(IAlarmQueryDAO.class, new MySQLAlarmQueryDAO(
+                mysqlClient,
+                getManager(),
+                config.getMaxSizeOfArrayColumn(),
+                config.getNumOfSearchableValuesPerTag()));
         this.registerServiceImplementation(
             IHistoryDeleteDAO.class, new H2HistoryDeleteDAO(mysqlClient));
         this.registerServiceImplementation(ITopNRecordsQueryDAO.class, new H2TopNRecordsQueryDAO(mysqlClient));
@@ -168,6 +172,13 @@ public class MySQLStorageProvider extends ModuleProvider {
                                                + "] * numOfSearchableValuesPerTag[" + config.getNumOfSearchableValuesPerTag()
                                                + "] > maxSizeOfArrayColumn[" + config.getMaxSizeOfArrayColumn()
                                                + "]. Potential out of bound in the runtime.");
+        }
+        final int numOfSearchableAlarmTags = configService.getSearchableAlarmTags().split(Const.COMMA).length;
+        if (numOfSearchableAlarmTags * config.getNumOfSearchableValuesPerTag() > config.getMaxSizeOfArrayColumn()) {
+            throw new ModuleStartException("Size of searchableAlarmTags[" + numOfSearchableAlarmTags
+                    + "] * numOfSearchableValuesPerTag[" + config.getNumOfSearchableValuesPerTag()
+                    + "] > maxSizeOfArrayColumn[" + config.getMaxSizeOfArrayColumn()
+                    + "]. Potential out of bound in the runtime.");
         }
 
         try {

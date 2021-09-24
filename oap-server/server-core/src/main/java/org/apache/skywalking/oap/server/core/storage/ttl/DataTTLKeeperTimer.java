@@ -72,22 +72,38 @@ public enum DataTTLKeeperTimer {
      * node list from {@link ClusterNodesQuery}.
      */
     private void delete() {
-        List<RemoteInstance> remoteInstances = clusterNodesQuery.queryRemoteNodes();
-        if (CollectionUtils.isNotEmpty(remoteInstances) && !remoteInstances.get(0).getAddress().isSelf()) {
-            log.info("The selected first getAddress is {}. Skip.", remoteInstances.get(0).toString());
-            return;
-        }
-
-        log.info("Beginning to remove expired metrics from the storage.");
         IModelManager modelGetter = moduleManager.find(CoreModule.NAME).provider().getService(IModelManager.class);
         List<Model> models = modelGetter.allModels();
-        models.forEach(this::execute);
+
+        try {
+            List<RemoteInstance> remoteInstances = clusterNodesQuery.queryRemoteNodes();
+            if (CollectionUtils.isNotEmpty(remoteInstances) && !remoteInstances.get(0).getAddress().isSelf()) {
+                log.info(
+                    "The selected first getAddress is {}. The remove stage is skipped.",
+                    remoteInstances.get(0).toString()
+                );
+                return;
+            }
+
+            log.info("Beginning to remove expired metrics from the storage.");
+            models.forEach(this::execute);
+        } finally {
+            log.info("Beginning to inspect data boundaries.");
+            this.inspect(models);
+        }
     }
 
     private void execute(Model model) {
         try {
             if (!model.isTimeSeries()) {
                 return;
+            }
+            if (log.isDebugEnabled()) {
+                log.debug(
+                    "Is record? {}. RecordDataTTL {}, MetricsDataTTL {}",
+                    model.isRecord(),
+                    moduleConfig.getRecordDataTTL(),
+                    moduleConfig.getMetricsDataTTL());
             }
             moduleManager.find(StorageModule.NAME)
                          .provider()
@@ -97,6 +113,17 @@ public enum DataTTLKeeperTimer {
                          );
         } catch (IOException e) {
             log.warn("History of {} delete failure", model.getName());
+            log.error(e.getMessage(), e);
+        }
+    }
+
+    private void inspect(List<Model> models) {
+        try {
+            moduleManager.find(StorageModule.NAME)
+                         .provider()
+                         .getService(IHistoryDeleteDAO.class)
+                         .inspect(models, Metrics.TIME_BUCKET);
+        } catch (IOException e) {
             log.error(e.getMessage(), e);
         }
     }

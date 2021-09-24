@@ -26,7 +26,6 @@ import java.util.Map;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.configuration.api.ConfigChangeWatcher;
-import org.apache.skywalking.oap.server.core.Const;
 import org.apache.skywalking.oap.server.core.alarm.AlarmModule;
 import org.apache.skywalking.oap.server.core.alarm.provider.dingtalk.DingtalkSettings;
 import org.apache.skywalking.oap.server.core.alarm.provider.expression.Expression;
@@ -35,6 +34,7 @@ import org.apache.skywalking.oap.server.core.alarm.provider.feishu.FeishuSetting
 import org.apache.skywalking.oap.server.core.alarm.provider.grpc.GRPCAlarmSetting;
 import org.apache.skywalking.oap.server.core.alarm.provider.slack.SlackSettings;
 import org.apache.skywalking.oap.server.core.alarm.provider.wechat.WechatSettings;
+import org.apache.skywalking.oap.server.core.alarm.provider.welink.WeLinkSettings;
 import org.apache.skywalking.oap.server.library.module.ModuleProvider;
 
 /**
@@ -57,7 +57,7 @@ public class AlarmRulesWatcher extends ConfigChangeWatcher {
         super(AlarmModule.NAME, provider, "alarm-settings");
         this.runningContext = new HashMap<>();
         this.alarmRuleRunningRuleMap = new HashMap<>();
-        this.settingsString = Const.EMPTY_STRING;
+        this.settingsString = null;
         Expression expression = new Expression(new ExpressionContext());
         this.compositeRuleEvaluator = new CompositeRuleEvaluator(expression);
         notify(defaultRules);
@@ -66,7 +66,7 @@ public class AlarmRulesWatcher extends ConfigChangeWatcher {
     @Override
     public void notify(ConfigChangeEvent value) {
         if (value.getEventType().equals(EventType.DELETE)) {
-            settingsString = Const.EMPTY_STRING;
+            settingsString = null;
             notify(new Rules());
         } else {
             settingsString = value.getNewValue();
@@ -139,4 +139,7 @@ public class AlarmRulesWatcher extends ConfigChangeWatcher {
         return this.rules.getFeishus();
     }
 
+    public WeLinkSettings getWeLinkSettings() {
+        return this.rules.getWelinks();
+    }
 }

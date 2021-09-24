@@ -50,4 +50,11 @@ public class SharingServerConfig extends ModuleConfig {
     private boolean gRPCSslEnabled = false;
     private String gRPCSslKeyPath;
     private String gRPCSslCertChainPath;
+    private String gRPCSslTrustedCAsPath;
+
+    /**
+     * The maximum size in bytes allowed for request headers.
+     * Use -1 to disable it.
+     */
+    private int httpMaxRequestHeaderSize = 8192;
 }

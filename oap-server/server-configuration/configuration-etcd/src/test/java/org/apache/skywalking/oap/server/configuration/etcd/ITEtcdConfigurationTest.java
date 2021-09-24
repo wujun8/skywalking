@@ -18,59 +18,58 @@
 
 package org.apache.skywalking.oap.server.configuration.etcd;
 
+import io.etcd.jetcd.ByteSequence;
+import io.etcd.jetcd.Client;
+import io.etcd.jetcd.KV;
 import java.io.FileNotFoundException;
 import java.io.Reader;
-import java.net.URI;
-import java.util.List;
+import java.nio.charset.Charset;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Properties;
-import mousio.etcd4j.EtcdClient;
-import mousio.etcd4j.promises.EtcdResponsePromise;
-import mousio.etcd4j.responses.EtcdKeysResponse;
+import java.util.concurrent.TimeUnit;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.apm.util.PropertyPlaceholderHelper;
 import org.apache.skywalking.oap.server.library.module.ApplicationConfiguration;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.util.CollectionUtils;
 import org.apache.skywalking.oap.server.library.util.ResourceUtils;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.utility.DockerImageName;
 import org.yaml.snakeyaml.Yaml;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
 
+@Slf4j
 public class ITEtcdConfigurationTest {
-
-    private static final Logger LOGGER = LoggerFactory.getLogger(ITEtcdConfigurationTest.class);
-
-    private final Yaml yaml = new Yaml();
-
-    private EtcdServerSettings settings;
+    @Rule
+    public final GenericContainer<?> container =
+        new GenericContainer<>(DockerImageName.parse("quay.io/coreos/etcd:v3.5.0"))
+            .waitingFor(Wait.forLogMessage(".*ready to serve client requests.*", 1))
+            .withEnv(Collections.singletonMap("ALLOW_NONE_AUTHENTICATION", "yes"))
+            .withCommand(
+                "etcd",
+                "--advertise-client-urls", "http://0.0.0.0:2379",
+                "--listen-client-urls", "http://0.0.0.0:2379"
+            );
 
     private EtcdConfigurationTestProvider provider;
 
-    private EtcdClient client;
-
     @Before
-    public void setUp() throws Exception {
+    public void before() throws Exception {
+        System.setProperty("etcd.endpoint", "http://127.0.0.1:" + container.getMappedPort(2379));
+
         final ApplicationConfiguration applicationConfiguration = new ApplicationConfiguration();
         loadConfig(applicationConfiguration);
 
         final ModuleManager moduleManager = new ModuleManager();
         moduleManager.init(applicationConfiguration);
-
-        final String etcdHost = System.getProperty("etcd.host");
-        final String etcdPort = System.getProperty("etcd.port");
-        LOGGER.info("etcdHost: {}, etcdPort: {}", etcdHost, etcdPort);
-        Properties properties = new Properties();
-        properties.setProperty("serverAddr", etcdHost + ":" + etcdPort);
-
-        List<URI> uris = EtcdUtils.parseProp(properties);
-        client = new EtcdClient(uris.toArray(new URI[] {}));
 
         provider = (EtcdConfigurationTestProvider) moduleManager.find(EtcdConfigurationTestModule.NAME).provider();
 
@@ -81,36 +80,102 @@ public class ITEtcdConfigurationTest {
     public void shouldReadUpdated() throws Exception {
         assertNull(provider.watcher.value());
 
-        assertTrue(publishConfig("test-module.default.testKey", "skywalking", "500"));
+        KV client = Client.builder()
+                          .endpoints("http://localhost:" + container.getMappedPort(2379))
+                          .namespace(ByteSequence.from("/skywalking/", Charset.defaultCharset()))
+                          .build()
+                          .getKVClient();
+
+        String testValue = "value";
+        client.put(
+            ByteSequence.from("test-module.default.testKey", Charset.defaultCharset()),
+            ByteSequence.from(testValue, Charset.defaultCharset())
+        ).get();
 
         for (String v = provider.watcher.value(); v == null; v = provider.watcher.value()) {
-            LOGGER.info("value is : {}", provider.watcher.value());
+            log.info("value is : {}", provider.watcher.value());
+            TimeUnit.MILLISECONDS.sleep(200L);
         }
 
-        assertEquals("500", provider.watcher.value());
+        assertEquals(testValue, provider.watcher.value());
 
-        assertTrue(removeConfig("test-module.default.testKey", "skywalking"));
+        client.delete(ByteSequence.from("test-module.default.testKey", Charset.defaultCharset())).get();
 
         for (String v = provider.watcher.value(); v != null; v = provider.watcher.value()) {
+            TimeUnit.MILLISECONDS.sleep(200L);
         }
 
         assertNull(provider.watcher.value());
     }
 
+    @Test(timeout = 20000)
+    public void shouldReadUpdated4Group() throws Exception {
+        assertEquals("{}", provider.groupWatcher.groupItems().toString());
+
+        KV client = Client.builder()
+                          .endpoints("http://localhost:" + container.getMappedPort(2379))
+                          .namespace(ByteSequence.from("/skywalking/", Charset.defaultCharset()))
+                          .build()
+                          .getKVClient();
+
+        client.put(
+            ByteSequence.from("test-module.default.testKeyGroup/item1", Charset.defaultCharset()),
+            ByteSequence.from("100", Charset.defaultCharset())
+        ).get();
+        client.put(
+            ByteSequence.from("test-module.default.testKeyGroup/item2", Charset.defaultCharset()),
+            ByteSequence.from("200", Charset.defaultCharset())
+        ).get();
+
+        for (String v = provider.groupWatcher.groupItems().get("item1"); v == null; v = provider.groupWatcher.groupItems().get("item1")) {
+            log.info("value is : {}", provider.groupWatcher.groupItems().get("item1"));
+            TimeUnit.MILLISECONDS.sleep(200L);
+        }
+        for (String v = provider.groupWatcher.groupItems().get("item2"); v == null; v = provider.groupWatcher.groupItems().get("item2")) {
+            log.info("value is : {}", provider.groupWatcher.groupItems().get("item2"));
+            TimeUnit.MILLISECONDS.sleep(200L);
+        }
+        assertEquals("100", provider.groupWatcher.groupItems().get("item1"));
+        assertEquals("200", provider.groupWatcher.groupItems().get("item2"));
+
+        //test remove item1
+        client.delete(ByteSequence.from("test-module.default.testKeyGroup/item1", Charset.defaultCharset())).get();
+        for (String v = provider.groupWatcher.groupItems().get("item1"); v != null; v = provider.groupWatcher.groupItems().get("item1")) {
+            log.info("value is : {}", provider.groupWatcher.groupItems().get("item1"));
+            TimeUnit.MILLISECONDS.sleep(200L);
+        }
+        assertNull(provider.groupWatcher.groupItems().get("item1"));
+
+        //test modify item2
+        client.put(
+            ByteSequence.from("test-module.default.testKeyGroup/item2", Charset.defaultCharset()),
+            ByteSequence.from("300", Charset.defaultCharset())
+        ).get();
+        for (String v = provider.groupWatcher.groupItems().get("item2"); v.equals("200"); v = provider.groupWatcher.groupItems().get("item2")) {
+            log.info("value is : {}", provider.groupWatcher.groupItems().get("item2"));
+            TimeUnit.MILLISECONDS.sleep(200L);
+        }
+        assertEquals("300", provider.groupWatcher.groupItems().get("item2"));
+    }
+
     @SuppressWarnings("unchecked")
-    private void loadConfig(ApplicationConfiguration configuration) throws FileNotFoundException {
+    private static void loadConfig(ApplicationConfiguration configuration) throws FileNotFoundException {
+        final Yaml yaml = new Yaml();
+
         Reader applicationReader = ResourceUtils.read("application.yml");
         Map<String, Map<String, Map<String, ?>>> moduleConfig = yaml.loadAs(applicationReader, Map.class);
         if (CollectionUtils.isNotEmpty(moduleConfig)) {
             moduleConfig.forEach((moduleName, providerConfig) -> {
                 if (providerConfig.size() > 0) {
-                    ApplicationConfiguration.ModuleConfiguration moduleConfiguration = configuration.addModule(moduleName);
+                    ApplicationConfiguration.ModuleConfiguration moduleConfiguration = configuration.addModule(
+                        moduleName);
                     providerConfig.forEach((name, propertiesConfig) -> {
                         Properties properties = new Properties();
                         if (propertiesConfig != null) {
                             propertiesConfig.forEach((key, value) -> {
                                 properties.put(key, value);
-                                final Object replaceValue = yaml.load(PropertyPlaceholderHelper.INSTANCE.replacePlaceholders(value + "", properties));
+                                final Object replaceValue = yaml.load(
+                                    PropertyPlaceholderHelper.INSTANCE.replacePlaceholders(value + "", properties));
                                 if (replaceValue != null) {
                                     properties.replace(key, replaceValue);
                                 }
@@ -122,25 +187,4 @@ public class ITEtcdConfigurationTest {
             });
         }
     }
-
-    private boolean publishConfig(String key, String group, String value) {
-        try {
-            client.putDir(group).send().get();
-            EtcdResponsePromise<EtcdKeysResponse> promise = client.put(generateKey(key, group), value).send();
-            promise.get();
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private boolean removeConfig(String key, String group) throws Exception {
-        client.delete(generateKey(key, group)).send().get();
-        return true;
-    }
-
-    private String generateKey(String key, String group) {
-        return new StringBuilder("/").append(group).append("/").append(key).toString();
-    }
-
 }

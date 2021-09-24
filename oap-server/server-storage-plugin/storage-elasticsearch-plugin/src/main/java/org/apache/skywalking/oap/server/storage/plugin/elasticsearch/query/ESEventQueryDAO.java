@@ -18,29 +18,30 @@
 
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
-import org.apache.skywalking.oap.server.core.event.Event;
+import org.apache.skywalking.library.elasticsearch.requests.search.BoolQueryBuilder;
+import org.apache.skywalking.library.elasticsearch.requests.search.Query;
+import org.apache.skywalking.library.elasticsearch.requests.search.Search;
+import org.apache.skywalking.library.elasticsearch.requests.search.SearchBuilder;
+import org.apache.skywalking.library.elasticsearch.requests.search.Sort;
+import org.apache.skywalking.library.elasticsearch.response.search.SearchHit;
+import org.apache.skywalking.library.elasticsearch.response.search.SearchResponse;
+import org.apache.skywalking.oap.server.core.query.PaginationUtils;
 import org.apache.skywalking.oap.server.core.query.enumeration.Order;
 import org.apache.skywalking.oap.server.core.query.input.Duration;
 import org.apache.skywalking.oap.server.core.query.type.event.EventQueryCondition;
 import org.apache.skywalking.oap.server.core.query.type.event.EventType;
 import org.apache.skywalking.oap.server.core.query.type.event.Events;
 import org.apache.skywalking.oap.server.core.query.type.event.Source;
+import org.apache.skywalking.oap.server.core.source.Event;
 import org.apache.skywalking.oap.server.core.storage.query.IEventQueryDAO;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.EsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.IndexController;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.MatchCNameBuilder;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.index.query.BoolQueryBuilder;
-import org.elasticsearch.index.query.QueryBuilder;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.search.SearchHit;
-import org.elasticsearch.search.builder.SearchSourceBuilder;
-import org.elasticsearch.search.sort.SortOrder;
 
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static java.util.Objects.isNull;
@@ -52,41 +53,45 @@ public class ESEventQueryDAO extends EsDAO implements IEventQueryDAO {
 
     @Override
     public Events queryEvents(final EventQueryCondition condition) throws Exception {
-        final SearchSourceBuilder sourceBuilder = buildQuery(condition);
+        final SearchBuilder sourceBuilder = buildQuery(condition);
+        return getEventsResultByCurrentBuilder(sourceBuilder);
+    }
 
-        final SearchResponse response = getClient()
-            .search(IndexController.LogicIndicesRegister.getPhysicalTableName(Event.INDEX_NAME), sourceBuilder);
+    @Override
+    public Events queryEvents(List<EventQueryCondition> conditionList) throws Exception {
+        final SearchBuilder sourceBuilder = buildQuery(conditionList);
+        return getEventsResultByCurrentBuilder(sourceBuilder);
+    }
 
+    private Events getEventsResultByCurrentBuilder(final SearchBuilder searchBuilder)
+        throws IOException {
+        final String index =
+            IndexController.LogicIndicesRegister.getPhysicalTableName(Event.INDEX_NAME);
+        final SearchResponse response = getClient().search(index, searchBuilder.build());
         final Events events = new Events();
-        events.setTotal((int) response.getHits().totalHits);
-        events.setEvents(Stream.of(response.getHits().getHits())
-                               .map(this::parseSearchHit)
-                               .collect(Collectors.toList()));
-
+        events.setTotal(response.getHits().getTotal());
+        events.setEvents(response.getHits().getHits().stream()
+                                 .map(this::parseSearchHit)
+                                 .collect(Collectors.toList()));
         return events;
     }
 
-    protected SearchSourceBuilder buildQuery(final EventQueryCondition condition) {
-        final SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource();
-        final BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
-        sourceBuilder.query(boolQueryBuilder);
-
-        final List<QueryBuilder> mustQueryList = boolQueryBuilder.must();
-
+    private void buildMustQueryListByCondition(final EventQueryCondition condition,
+                                               final BoolQueryBuilder query) {
         if (!isNullOrEmpty(condition.getUuid())) {
-            mustQueryList.add(QueryBuilders.termQuery(Event.UUID, condition.getUuid()));
+            query.must(Query.term(Event.UUID, condition.getUuid()));
         }
 
         final Source source = condition.getSource();
         if (source != null) {
             if (!isNullOrEmpty(source.getService())) {
-                mustQueryList.add(QueryBuilders.termQuery(Event.SERVICE, source.getService()));
+                query.must(Query.term(Event.SERVICE, source.getService()));
             }
             if (!isNullOrEmpty(source.getServiceInstance())) {
-                mustQueryList.add(QueryBuilders.termQuery(Event.SERVICE_INSTANCE, source.getServiceInstance()));
+                query.must(Query.term(Event.SERVICE_INSTANCE, source.getServiceInstance()));
             }
             if (!isNullOrEmpty(source.getEndpoint())) {
-                mustQueryList.add(QueryBuilders.matchPhraseQuery(
+                query.must(Query.matchPhrase(
                     MatchCNameBuilder.INSTANCE.build(Event.ENDPOINT),
                     source.getEndpoint()
                 ));
@@ -94,48 +99,82 @@ public class ESEventQueryDAO extends EsDAO implements IEventQueryDAO {
         }
 
         if (!isNullOrEmpty(condition.getName())) {
-            mustQueryList.add(QueryBuilders.termQuery(Event.NAME, condition.getName()));
+            query.must(Query.term(Event.NAME, condition.getName()));
         }
 
         if (condition.getType() != null) {
-            mustQueryList.add(QueryBuilders.termQuery(Event.TYPE, condition.getType().name()));
+            query.must(Query.term(Event.TYPE, condition.getType().name()));
         }
 
         final Duration startTime = condition.getTime();
         if (startTime != null) {
             if (startTime.getStartTimestamp() > 0) {
-                mustQueryList.add(QueryBuilders.rangeQuery(Event.START_TIME)
-                                               .gt(startTime.getStartTimestamp()));
+                query.must(Query.range(Event.START_TIME).gt(startTime.getStartTimestamp()));
             }
             if (startTime.getEndTimestamp() > 0) {
-                mustQueryList.add(QueryBuilders.rangeQuery(Event.END_TIME)
-                                               .lt(startTime.getEndTimestamp()));
+                query.must(Query.range(Event.END_TIME).lt(startTime.getEndTimestamp()));
             }
         }
-
-        final Order queryOrder = isNull(condition.getOrder()) ? Order.DES : condition.getOrder();
-        sourceBuilder.sort(Event.START_TIME, Order.DES.equals(queryOrder) ? SortOrder.DESC : SortOrder.ASC);
-        sourceBuilder.size(condition.getSize());
-
-        return sourceBuilder;
     }
 
-    protected org.apache.skywalking.oap.server.core.query.type.event.Event parseSearchHit(final SearchHit searchHit) {
-        final org.apache.skywalking.oap.server.core.query.type.event.Event event = new org.apache.skywalking.oap.server.core.query.type.event.Event();
+    protected SearchBuilder buildQuery(final List<EventQueryCondition> conditionList) {
+        final BoolQueryBuilder query = Query.bool();
 
-        event.setUuid((String) searchHit.getSourceAsMap().get(Event.UUID));
+        conditionList.forEach(condition -> {
+            final BoolQueryBuilder bool = Query.bool();
+            query.should(bool);
+            buildMustQueryListByCondition(condition, bool);
+        });
+        EventQueryCondition condition = conditionList.get(0);
+        final Order queryOrder = isNull(condition.getOrder()) ? Order.DES : condition.getOrder();
+        final PaginationUtils.Page page = PaginationUtils.INSTANCE.exchange(condition.getPaging());
 
-        String service = searchHit.getSourceAsMap().getOrDefault(Event.SERVICE, "").toString();
-        String serviceInstance = searchHit.getSourceAsMap().getOrDefault(Event.SERVICE_INSTANCE, "").toString();
-        String endpoint = searchHit.getSourceAsMap().getOrDefault(Event.ENDPOINT, "").toString();
+        return Search.builder().query(query)
+                     .sort(
+                         Event.START_TIME,
+                         Order.DES.equals(queryOrder) ? Sort.Order.DESC : Sort.Order.ASC
+                     )
+                     .from(page.getFrom())
+                     .size(page.getLimit());
+    }
+
+    protected SearchBuilder buildQuery(final EventQueryCondition condition) {
+        final BoolQueryBuilder query = Query.bool();
+
+        buildMustQueryListByCondition(condition, query);
+
+        final Order queryOrder = isNull(condition.getOrder()) ? Order.DES : condition.getOrder();
+        final PaginationUtils.Page page = PaginationUtils.INSTANCE.exchange(condition.getPaging());
+
+        return Search.builder()
+                     .query(query)
+                     .sort(
+                         Event.START_TIME,
+                         Order.DES.equals(queryOrder) ? Sort.Order.DESC : Sort.Order.ASC
+                     )
+                     .from(page.getFrom())
+                     .size(page.getLimit());
+    }
+
+    protected org.apache.skywalking.oap.server.core.query.type.event.Event parseSearchHit(
+        final SearchHit searchHit) {
+        final org.apache.skywalking.oap.server.core.query.type.event.Event event =
+            new org.apache.skywalking.oap.server.core.query.type.event.Event();
+
+        event.setUuid((String) searchHit.getSource().get(Event.UUID));
+
+        String service = searchHit.getSource().getOrDefault(Event.SERVICE, "").toString();
+        String serviceInstance =
+            searchHit.getSource().getOrDefault(Event.SERVICE_INSTANCE, "").toString();
+        String endpoint = searchHit.getSource().getOrDefault(Event.ENDPOINT, "").toString();
         event.setSource(new Source(service, serviceInstance, endpoint));
 
-        event.setName((String) searchHit.getSourceAsMap().get(Event.NAME));
-        event.setType(EventType.parse(searchHit.getSourceAsMap().get(Event.TYPE).toString()));
-        event.setMessage((String) searchHit.getSourceAsMap().get(Event.MESSAGE));
-        event.setParameters((String) searchHit.getSourceAsMap().get(Event.PARAMETERS));
-        event.setStartTime(Long.parseLong(searchHit.getSourceAsMap().get(Event.START_TIME).toString()));
-        String endTimeStr = searchHit.getSourceAsMap().getOrDefault(Event.END_TIME, "0").toString();
+        event.setName((String) searchHit.getSource().get(Event.NAME));
+        event.setType(EventType.parse(searchHit.getSource().get(Event.TYPE).toString()));
+        event.setMessage((String) searchHit.getSource().get(Event.MESSAGE));
+        event.setParameters((String) searchHit.getSource().get(Event.PARAMETERS));
+        event.setStartTime(Long.parseLong(searchHit.getSource().get(Event.START_TIME).toString()));
+        String endTimeStr = searchHit.getSource().getOrDefault(Event.END_TIME, "0").toString();
         if (!endTimeStr.isEmpty() && !Objects.equals(endTimeStr, "0")) {
             event.setEndTime(Long.parseLong(endTimeStr));
         }

@@ -92,7 +92,14 @@ public class ServiceInstanceRelation extends Source {
     private boolean status;
     @Getter
     @Setter
+    @Deprecated
     private int responseCode;
+    @Getter
+    @Setter
+    private int httpResponseStatusCode;
+    @Getter
+    @Setter
+    private String rpcStatusCode;
     @Getter
     @Setter
     private RequestType type;
@@ -105,6 +112,9 @@ public class ServiceInstanceRelation extends Source {
     @Getter
     @Setter
     private SideCar sideCar = new SideCar();
+    @Getter
+    @Setter
+    private TCPInfo tcpInfo = new TCPInfo();
 
     @Override
     public void prepare() {
